@@ -8,7 +8,11 @@ import os
 import subprocess 
 
 # Configuración y Variables Globales
-OUTPUT_FILE = "REGISTRO_HID.xlsx"
+OUTPUT_FILE_NAME = "REGISTRO_HID.xlsx"
+# RUTA ABSOLUTA FORZADA: Cambiada a la ruta especificada por el usuario
+OUTPUT_FOLDER_PATH = r"C:\Users\Omar Zambrano\Desktop\DHL Clasify"
+FILE_PATH = os.path.join(OUTPUT_FOLDER_PATH, OUTPUT_FILE_NAME)
+
 SCAN_QUEUE = queue.Queue()
 PROCESS_RUNNING = False
 STORES = ['DHL', '99MINUTOS', 'FEDEX', 'TERRESTRE', 'BLINK']
@@ -17,14 +21,12 @@ STORES = ['DHL', '99MINUTOS', 'FEDEX', 'TERRESTRE', 'BLINK']
 DATA_CACHE = {}
 COUNTS = {store: 0 for store in STORES}
 TOTAL_SCANS = 0
-# Usamos el directorio donde se ejecuta el script para la ruta absoluta del archivo
-FILE_PATH = os.path.join(os.getcwd(), OUTPUT_FILE) 
 
-# ----------------- Lógica de Archivos y Datos (Paso a Paso) -----------------
+# ----------------- Lógica de Archivos y Datos -----------------
 
 def load_initial_data():
     """Carga los datos existentes del Excel al inicio del programa.
-       Paso 1: Intentar leer el archivo si existe."""
+       Se asegura de cargar solo si el directorio existe."""
     global DATA_CACHE, COUNTS, TOTAL_SCANS
     DATA_CACHE = {}
     COUNTS = {store: 0 for store in STORES}
@@ -32,7 +34,7 @@ def load_initial_data():
     
     try:
         if not os.path.exists(FILE_PATH):
-            print(f"Archivo {OUTPUT_FILE} no encontrado. Creando nueva caché.")
+            print(f"Archivo {OUTPUT_FILE_NAME} no encontrado en la ruta {OUTPUT_FOLDER_PATH}. Creando nueva caché.")
             return
 
         xls = pd.ExcelFile(FILE_PATH)
@@ -42,49 +44,43 @@ def load_initial_data():
             df = xls.parse(sheet)
             DATA_CACHE[sheet] = df
             
-            # Recalcular contadores
             ok_counts = df[df['Status'] == 'OK'].shape[0]
             if sheet in COUNTS:
                 COUNTS[sheet] = ok_counts
             TOTAL_SCANS += ok_counts
             
-        print(f"Datos cargados exitosamente desde {OUTPUT_FILE}.")
+        print(f"Datos cargados exitosamente desde {OUTPUT_FILE_NAME}.")
     except Exception as e:
-        messagebox.showerror("Error de Lectura", f"No se pudo leer el archivo Excel '{OUTPUT_FILE}'. Asegúrese de que no esté abierto.\nError: {e}")
+        messagebox.showerror("Error de Lectura", f"No se pudo leer el archivo Excel '{OUTPUT_FILE_NAME}'. Asegúrese de que no esté abierto.\nError: {e}")
 
 def save_current_data():
-    """Guarda los datos de la caché en el Excel de forma segura.
-       Paso 2: Escribir los datos en el archivo Excel."""
+    """Guarda los datos de la caché en el Excel de forma segura."""
     try:
-        # Asegurarse de que el directorio exista (debería ser el CWD)
-        os.makedirs(os.path.dirname(FILE_PATH) or '.', exist_ok=True)
+        # Paso CLAVE: Forzar la creación de la carpeta si no existe
+        os.makedirs(OUTPUT_FOLDER_PATH, exist_ok=True)
         
-        # Usamos el path absoluto para evitar problemas de ruta
+        # Guardar en la ruta absoluta y forzada
         writer = pd.ExcelWriter(FILE_PATH, engine='xlsxwriter')
         all_sheets = set(STORES).union(DATA_CACHE.keys())
         
         for sheet in sorted(all_sheets):
-            # Obtener el DataFrame o crear uno vacío si la tienda es nueva
             df = DATA_CACHE.get(sheet, pd.DataFrame(columns=['Timestamp', 'Code', 'Status']))
             df.to_excel(writer, sheet_name=sheet, index=False)
             
         writer.close()
-        print(f"Datos guardados exitosamente en {OUTPUT_FILE}.")
+        print(f"Datos guardados exitosamente en {OUTPUT_FILE_NAME}.")
         return True
     except PermissionError:
-        messagebox.showerror("Error de Permiso", f"No se puede guardar el archivo '{OUTPUT_FILE}'. Asegúrese de que el archivo NO esté abierto en otra aplicación (Excel).")
+        messagebox.showerror("Error de Permiso", f"No se puede guardar el archivo '{OUTPUT_FILE_NAME}'. Asegúrese de que el archivo NO esté abierto en otra aplicación (Excel).")
         return False
     except Exception as e:
         messagebox.showerror("Error de Escritura", f"Error desconocido al guardar los datos: {e}")
         return False
 
 def open_output_folder():
-    """Abre la carpeta que contiene el archivo de Excel."""
+    """Abre la carpeta de registros."""
     try:
-        folder = os.path.dirname(FILE_PATH)
-        if not folder:
-            folder = os.getcwd() 
-
+        folder = OUTPUT_FOLDER_PATH
         if os.path.exists(folder):
             if os.name == 'nt': # Windows
                 subprocess.Popen(['explorer', folder])
@@ -93,8 +89,7 @@ def open_output_folder():
             else: # Linux/Otros
                 subprocess.Popen(['xdg-open', folder])
         else:
-            # Si la ruta no existe, abre el directorio de trabajo actual
-            subprocess.Popen(['explorer', os.getcwd()])
+            messagebox.showinfo("Carpeta no encontrada", f"La carpeta {folder} aún no existe. Intente escanear y guardar primero.")
             
     except Exception as e:
         messagebox.showerror("Error", f"No se pudo abrir la carpeta. Error: {e}")
@@ -103,11 +98,9 @@ def open_output_folder():
 # ----------------- Procesamiento de Scans (Worker Thread) -----------------
 
 def process_worker():
-    """Procesa los escaneos de la cola en un hilo separado.
-       Paso 3: El hilo se ejecuta en segundo plano para procesar la cola."""
+    """Procesa los escaneos de la cola en un hilo separado."""
     global TOTAL_SCANS, COUNTS, DATA_CACHE
     
-    # 3.1: Carga inicial de datos ANTES de procesar
     load_initial_data() 
     app.after(0, app.update_initial_interface)
 
@@ -118,7 +111,6 @@ def process_worker():
             continue
 
         try:
-            # 3.2: Procesar la trama de la cámara (TIENDA,CÓDIGO)
             parts = line.split(',')
             if len(parts) != 2:
                 continue
@@ -132,7 +124,6 @@ def process_worker():
 
             df = DATA_CACHE[store_name]
             
-            # 3.3: Lógica de Duplicados (DUP vs OK)
             if code in df['Code'].values:
                 status = 'DUP'
             else:
@@ -140,11 +131,9 @@ def process_worker():
                 TOTAL_SCANS += 1
                 COUNTS[store_name] = COUNTS.get(store_name, 0) + 1
             
-            # Añadir nuevo registro a la caché
             new_row = pd.DataFrame([{'Timestamp': timestamp, 'Code': code, 'Status': status}])
             DATA_CACHE[store_name] = pd.concat([df, new_row], ignore_index=True)
             
-            # 3.4: Actualizar GUI desde el hilo principal (after(0, ...))
             app.after(0, app.update_scan_interface, store_name, code, status)
             
         except Exception as e:
@@ -152,7 +141,6 @@ def process_worker():
         finally:
             SCAN_QUEUE.task_done()
     
-    # Paso 4: Guardar los datos al finalizar el hilo de trabajo
     app.after(0, app.save_button.config, {'state': tk.NORMAL})
     save_current_data()
     app.after(0, app.status_label.config, {'text': "STATUS: DETENIDO - Archivo Excel actualizado.", 'foreground': "red"})
@@ -163,7 +151,7 @@ def process_worker():
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Clasificador HID PRO V4")
+        self.title("Clasificador HID PRO V5")
         self.geometry("650x450")
         self.style = ttk.Style(self)
         self.style.theme_use('clam')
@@ -181,7 +169,7 @@ class App(tk.Tk):
         control_frame = ttk.Frame(self, padding="10")
         control_frame.pack(fill='x')
         
-        ttk.Label(control_frame, text=f"Archivo de Salida: {OUTPUT_FILE}", font=('Arial', 9)).pack(side=tk.LEFT, padx=10)
+        ttk.Label(control_frame, text=f"Ruta de Salida: {FILE_PATH}", font=('Arial', 9)).pack(side=tk.LEFT, padx=10)
         
         # Botones de Acción
         self.start_button = ttk.Button(control_frame, text="INICIAR ESCUCHA (HID)", command=self.start_process)
@@ -227,7 +215,6 @@ class App(tk.Tk):
     # --- Métodos de Captura ---
 
     def handle_key_input(self, event):
-        """Captura la entrada de teclado (cámara HID)."""
         global PROCESS_RUNNING
         if not PROCESS_RUNNING:
             return
@@ -242,19 +229,16 @@ class App(tk.Tk):
             self.input_buffer += char
 
     def handle_focus_in(self, event):
-        """Maneja cuando la ventana gana el foco."""
         self.focus_indicator.config(text="✅ VENTANA CON FOCO (CAPTURA ACTIVA)", foreground="green")
         self.bind('<Key>', self.handle_key_input)
 
     def handle_focus_out(self, event):
-        """Maneja cuando la ventana pierde el foco."""
         self.focus_indicator.config(text="⚠️ VENTANA SIN FOCO (NO CAPTURARÁ)", foreground="red")
         self.unbind('<Key>')
 
     # --- Métodos de Control ---
 
     def start_process(self):
-        """Inicia el proceso de escucha y el hilo de procesamiento."""
         global PROCESS_RUNNING, worker_thread
         if PROCESS_RUNNING: return
 
@@ -271,7 +255,6 @@ class App(tk.Tk):
         self.focus_force() 
 
     def stop_process(self):
-        """Detiene el proceso de escucha y el hilo de procesamiento."""
         global PROCESS_RUNNING
         if not PROCESS_RUNNING: return
 
@@ -292,12 +275,10 @@ class App(tk.Tk):
             self.save_button.config(state=tk.NORMAL)
 
     def manual_save(self):
-        """Función para guardar los datos de forma manual."""
         if save_current_data():
              self.status_label.config(text="STATUS: Guardado Manual Exitoso.", foreground="darkgreen")
 
     def on_closing(self):
-        """Maneja el evento de cierre de ventana."""
         if PROCESS_RUNNING:
             if messagebox.askyesno("Detener Proceso", "El proceso está activo. ¿Desea detenerlo y guardar antes de salir?"):
                 self.stop_process()
@@ -310,11 +291,8 @@ class App(tk.Tk):
     # --- Métodos de Actualización ---
 
     def update_scan_interface(self, store, code, status):
-        """Actualiza la interfaz con el último scan y los totales."""
-        
         color = "blue" if status == 'OK' else "red"
         self.last_scan_label.config(text=f"ÚLTIMO: {store} ({code}) -> {status}", foreground=color)
-        
         self.total_scans_label.config(text=f"Total Registros Únicos: {TOTAL_SCANS}")
         
         for name, count in COUNTS.items():
@@ -322,7 +300,6 @@ class App(tk.Tk):
                 self.count_labels[name].config(text=f"{name}: {count}")
 
     def update_initial_interface(self):
-        """Actualiza la interfaz con los datos cargados al inicio."""
         self.total_scans_label.config(text=f"Total Registros Únicos: {TOTAL_SCANS}")
         for name, count in COUNTS.items():
             if name in self.count_labels:
@@ -330,7 +307,6 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    # Inicializar la aplicación y cargar la interfaz
     app = App()
     worker_thread = None
     app.mainloop()
